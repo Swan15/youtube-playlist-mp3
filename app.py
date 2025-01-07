@@ -1,22 +1,18 @@
 import streamlit as st
 import yt_dlp
 import os
+import zipfile
+import io
+import tempfile
+import shutil
 
-def progress_hook(d):
-    if d['status'] == 'downloading':
-        try:
-            total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
-            downloaded = d.get('downloaded_bytes', 0)
-            if total > 0:
-                progress = (downloaded / total)
-                st.session_state.progress_bar.progress(progress)
-                st.session_state.status_text.text(f"Downloading: {d['filename']} - {d.get('_percent_str', '0%')}")
-        except Exception:
-            pass
-    elif d['status'] == 'finished':
-        st.session_state.status_text.text(f"Converting {d['filename']} to MP3...")
+st.title("YouTube Playlist to MP3 Downloader")
+st.write("Enter a YouTube playlist URL to convert and download all videos as MP3 files.")
 
-def download_playlist_as_mp3(playlist_url, download_dir):
+def download_playlist_as_mp3(playlist_url):
+    # Create a temporary directory for downloads
+    temp_dir = tempfile.mkdtemp()
+    
     ydl_opts = {
         'format': 'bestaudio/best',
         'postprocessors': [{
@@ -24,45 +20,60 @@ def download_playlist_as_mp3(playlist_url, download_dir):
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }],
-        'outtmpl': os.path.join(download_dir, '%(title)s.%(ext)s'),
-        'quiet': False,
+        'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+        'quiet': True,
         'noplaylist': False,
-        'progress_hooks': [progress_hook],
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([playlist_url])
-        return True, "Download completed successfully!"
+            # Extract playlist info first
+            playlist_info = ydl.extract_info(playlist_url, download=False)
+            total_files = len(playlist_info['entries'])
+            
+            # Create a progress bar
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            # Download each video with progress updates
+            for i, entry in enumerate(playlist_info['entries'], 1):
+                status_text.text(f"Downloading {i}/{total_files}: {entry['title']}")
+                ydl.download([entry['webpage_url']])
+                progress_bar.progress(i/total_files)
+        
+        # Create a ZIP file in memory
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for file in os.listdir(temp_dir):
+                if file.endswith('.mp3'):
+                    file_path = os.path.join(temp_dir, file)
+                    zip_file.write(file_path, file)
+        
+        # Clean up the temporary directory
+        shutil.rmtree(temp_dir)
+        
+        return zip_buffer.getvalue()
+        
     except Exception as e:
-        return False, f"Error occurred: {str(e)}"
+        st.error(f"An error occurred: {str(e)}")
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        return None
 
-st.title('YouTube Playlist Downloader')
-st.write('Enter a YouTube playlist URL and download location to download all videos as MP3')
+# Create the main interface
+playlist_url = st.text_input("YouTube Playlist URL", placeholder="https://www.youtube.com/playlist?list=...")
 
-download_dir = st.text_input('Download Directory (full path)', 
-                            value=os.path.expanduser('~/Downloads'),
-                            help='Enter the full path where you want to save the MP3 files')
-
-url = st.text_input('Playlist URL')
-if st.button('Download'):
-    if url and download_dir:
-        if not os.path.exists(download_dir):
-            try:
-                os.makedirs(download_dir)
-            except Exception as e:
-                st.error(f'Could not create download directory: {str(e)}')
-                st.stop()
-        
-        st.session_state.progress_bar = st.progress(0)
-        st.session_state.status_text = st.empty()
-        
-        with st.spinner('Processing...'):
-            success, message = download_playlist_as_mp3(url, download_dir)
-            if success:
-                st.session_state.status_text.text("All downloads completed!")
-                st.success(message)
-            else:
-                st.error(message)
+if st.button("Convert to MP3"):
+    if playlist_url:
+        with st.spinner("Processing playlist... This may take a while depending on the playlist size."):
+            zip_data = download_playlist_as_mp3(playlist_url)
+            if zip_data:
+                st.success("Conversion completed! Click below to download.")
+                st.download_button(
+                    label="Download MP3s (ZIP)",
+                    data=zip_data,
+                    file_name="playlist_mp3s.zip",
+                    mime="application/zip"
+                )
     else:
-        st.error('Please enter both a URL and download directory') 
+        st.warning("Please enter a valid YouTube playlist URL") 
